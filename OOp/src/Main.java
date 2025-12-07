@@ -1,5 +1,6 @@
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Scanner;
 
@@ -7,7 +8,22 @@ public class Main {
 
     public static void main(String[] args) {
         GameManager game = GameManager.getInstance();
-        game.start();
+        game.addObserver(new ConsoleLogger());
+        game.setCardFactory(new FancyCardFactory());
+
+        Scanner scanner = new Scanner(System.in);
+
+        while (true) {
+            game.start();
+
+            System.out.println("Натисніть Enter щоб зіграти ще раз, або введіть 'q' для виходу:");
+            String input = scanner.nextLine();
+
+            if (input.trim().equalsIgnoreCase("q")) {
+                System.out.println("Дякуємо за гру!");
+                break;
+            }
+        }
     }
 
     static class GameConfig {
@@ -23,7 +39,13 @@ public class Main {
         public DeckEmptyException() { super("У колоді закінчилися карти!"); }
     }
 
-    enum Suit { HEARTS, DIAMONDS, CLUBS, SPADES }
+    enum Suit {
+        HEARTS("♥"), DIAMONDS("♦"), CLUBS("♣"), SPADES("♠");
+        final String symbol;
+        Suit(String symbol) { this.symbol = symbol; }
+        @Override public String toString() { return symbol; }
+    }
+
     enum Rank {
         TWO(2), THREE(3), FOUR(4), FIVE(5), SIX(6), SEVEN(7), EIGHT(8), NINE(9), TEN(10),
         JACK(10), QUEEN(10), KING(10), ACE(11);
@@ -33,34 +55,83 @@ public class Main {
         public int getValue() { return value; }
     }
 
-    static class Card {
+    interface ICard {
+        int getValue();
+        Rank getRank();
+        String getDisplayString();
+    }
+
+    static class SimpleCard implements ICard {
         private final Suit suit;
         private final Rank rank;
 
-        public Card(Suit suit, Rank rank) {
+        public SimpleCard(Suit suit, Rank rank) {
             this.suit = suit;
             this.rank = rank;
         }
 
-        public int getValue() { return rank.getValue(); }
+        @Override public int getValue() { return rank.getValue(); }
+        @Override public Rank getRank() { return rank; }
+        @Override public String getDisplayString() { return rank + " " + suit; }
+        @Override public String toString() { return getDisplayString(); }
+    }
 
+    abstract static class CardDecorator implements ICard {
+        protected final ICard decoratedCard;
+        public CardDecorator(ICard card) { this.decoratedCard = card; }
+        @Override public int getValue() { return decoratedCard.getValue(); }
+        @Override public Rank getRank() { return decoratedCard.getRank(); }
+        @Override public String toString() { return getDisplayString(); }
+    }
+
+    static class FancyCardDecorator extends CardDecorator {
+        public FancyCardDecorator(ICard card) { super(card); }
         @Override
-        public String toString() { return rank + " of " + suit; }
+        public String getDisplayString() {
+            return "[" + decoratedCard.getDisplayString() + "]";
+        }
+    }
+
+    interface CardFactory {
+        ICard createCard(Suit suit, Rank rank);
+    }
+
+    static class SimpleCardFactory implements CardFactory {
+        @Override
+        public ICard createCard(Suit suit, Rank rank) {
+            return new SimpleCard(suit, rank);
+        }
+    }
+
+    static class FancyCardFactory implements CardFactory {
+        @Override
+        public ICard createCard(Suit suit, Rank rank) {
+            return new FancyCardDecorator(new SimpleCard(suit, rank));
+        }
     }
 
     static class Deck {
-        final private List<Card> cards;
+        final private List<ICard> cards;
+        private CardFactory factory;
 
-        public Deck() {
+        public Deck(CardFactory factory) {
+            this.factory = factory;
             this.cards = new ArrayList<>();
+            refill();
+        }
+
+        public void setFactory(CardFactory factory) {
+            this.factory = factory;
             refill();
         }
 
         public void refill() {
             cards.clear();
+            if (factory == null) return;
+
             for (Suit suit : Suit.values()) {
                 for (Rank rank : Rank.values()) {
-                    cards.add(new Card(suit, rank));
+                    cards.add(factory.createCard(suit, rank));
                 }
             }
             shuffle();
@@ -70,30 +141,30 @@ public class Main {
             Collections.shuffle(cards);
         }
 
-        public Card draw() throws DeckEmptyException {
+        public ICard draw() throws DeckEmptyException {
             if (cards.isEmpty()) {
                 throw new DeckEmptyException();
             }
-            return cards.removeFirst();
+            return cards.remove(0);
         }
     }
 
-    static class Hand {
-        final private List<Card> cards = new ArrayList<>();
+    static class Hand implements Iterable<ICard> {
+        final private List<ICard> cards = new ArrayList<>();
 
-        public void addCard(Card card) {
+        public void addCard(ICard card) {
             cards.add(card);
         }
 
-        public List<Card> getCards() { return cards; }
+        public List<ICard> getCards() { return cards; }
 
         public int calculateScore() {
             int score = 0;
             int aces = 0;
 
-            for (Card card : cards) {
+            for (ICard card : cards) {
                 score += card.getValue();
-                if (card.rank == Rank.ACE) aces++;
+                if (card.getRank() == Rank.ACE) aces++;
             }
 
             while (score > GameConfig.BLACKJACK_LIMIT && aces > 0) {
@@ -113,15 +184,20 @@ public class Main {
 
         @Override
         public String toString() { return cards.toString(); }
+
+        @Override
+        public Iterator<ICard> iterator() {
+            return cards.iterator();
+        }
     }
 
     interface MoveStrategy {
-        boolean shouldHit(Hand hand, Card dealerVisibleCard);
+        boolean shouldHit(Hand hand, ICard dealerVisibleCard);
     }
 
     static class DealerStrategy implements MoveStrategy {
         @Override
-        public boolean shouldHit(Hand hand, Card dealerVisibleCard) {
+        public boolean shouldHit(Hand hand, ICard dealerVisibleCard) {
             return hand.calculateScore() < GameConfig.DEALER_STOP_LIMIT;
         }
     }
@@ -130,23 +206,15 @@ public class Main {
         final private Scanner scanner = new Scanner(System.in);
 
         @Override
-        public boolean shouldHit(Hand hand, Card dealerVisibleCard) {
+        public boolean shouldHit(Hand hand, ICard dealerVisibleCard) {
             while (true) {
-                System.out.print("Ваш хід: (1) Взяти карту, (2) Досить: ");
+                System.out.print(">> Ваш хід: (1) Взяти карту, (2) Досить: ");
                 String input = scanner.nextLine().trim();
 
-                if (input.isEmpty()) {
-                    System.out.println("Помилка: Ввід не може бути пустим. Спробуйте ще раз.");
-                    continue;
-                }
+                if (input.equals("1")) return true;
+                if (input.equals("2")) return false;
 
-                if (input.equals("1")) {
-                    return true;
-                } else if (input.equals("2")) {
-                    return false;
-                } else {
-                    System.out.println("Помилка: Некоректний символ '" + input + "'. Будь ласка, введіть 1 або 2.");
-                }
+                System.out.println("Помилка: введіть 1 або 2.");
             }
         }
     }
@@ -162,11 +230,11 @@ public class Main {
             this.hand = new Hand();
         }
 
-        public boolean makeMove(Deck deck, Card dealerVisibleCard) throws GameException {
+        public boolean makeMove(Deck deck, ICard dealerVisibleCard, GameObserver logger) throws GameException {
             if (strategy.shouldHit(hand, dealerVisibleCard)) {
-                Card card = deck.draw();
+                ICard card = deck.draw();
                 hand.addCard(card);
-                System.out.println(name + " взяв карту: " + card);
+                logger.update(name + " взяв карту: " + card);
                 return true;
             }
             return false;
@@ -181,23 +249,46 @@ public class Main {
     }
 
     static class Dealer extends Participant {
-        public Dealer() { super("Dealer", new DealerStrategy()); }
+        public Dealer() { super("Дилер", new DealerStrategy()); }
 
-        public Card getVisibleCard() {
-            return hand.getCards().isEmpty() ? null : hand.getCards().getFirst();
+        public ICard getVisibleCard() {
+            if (hand.getCards().isEmpty()) return null;
+            return hand.getCards().get(0);
+        }
+    }
+
+    static class ParticipantFactory {
+        public static Participant create(String type) {
+            switch (type.toUpperCase()) {
+                case "PLAYER": return new Player("Гравець");
+                case "DEALER": return new Dealer();
+                default: throw new IllegalArgumentException("Невідомий тип учасника");
+            }
+        }
+    }
+
+    interface GameObserver {
+        void update(String message);
+    }
+
+    static class ConsoleLogger implements GameObserver {
+        @Override
+        public void update(String message) {
+            System.out.println(message);
         }
     }
 
     static class GameManager {
         private static GameManager instance;
         final private Deck deck;
-        final private Participant player;
-        final private Dealer dealer;
+        private Participant player;
+        private Participant dealer;
+        final private List<GameObserver> observers = new ArrayList<>();
+        private CardFactory cardFactory;
 
         private GameManager() {
-            deck = new Deck();
-            player = new Player("Гравець");
-            dealer = new Dealer();
+            this.cardFactory = new SimpleCardFactory();
+            this.deck = new Deck(cardFactory);
         }
 
         public static GameManager getInstance() {
@@ -205,26 +296,47 @@ public class Main {
             return instance;
         }
 
+        public void setCardFactory(CardFactory factory) {
+            this.cardFactory = factory;
+            this.deck.setFactory(factory);
+        }
+
+        public void addObserver(GameObserver observer) {
+            observers.add(observer);
+        }
+
+        private void notifyObservers(String message) {
+            for (GameObserver observer : observers) {
+                observer.update(message);
+            }
+        }
+
         public void start() {
-            System.out.println("--- БЛЕКДЖЕК PRO ---");
+            notifyObservers("--- БЛЕКДЖЕК PRO STARTED ---");
+
+            this.player = ParticipantFactory.create("PLAYER");
+            this.dealer = ParticipantFactory.create("DEALER");
+
+            this.deck.refill();
+
             try {
                 playRound();
             } catch (GameException e) {
-                System.err.println("Помилка гри: " + e.getMessage());
+                notifyObservers("Критична помилка гри: " + e.getMessage());
             }
         }
 
         private void playRound() throws GameException {
             dealInitialCards();
 
-            processParticipantTurn(player, dealer.getVisibleCard());
+            processParticipantTurn(player, ((Dealer)dealer).getVisibleCard());
 
             if (player.getHand().isBusted()) {
-                System.out.println("ПЕРЕБІР! Ви програли.");
+                notifyObservers("ПЕРЕБІР! Ви програли.");
                 return;
             }
 
-            System.out.println("\n--- Хід Дилера ---");
+            notifyObservers("\n--- Хід Дилера ---");
             processParticipantTurn(dealer, null);
 
             determineWinner();
@@ -235,21 +347,23 @@ public class Main {
             dealer.getHand().addCard(deck.draw());
             player.getHand().addCard(deck.draw());
             dealer.getHand().addCard(deck.draw());
+
+            notifyObservers("Роздача завершена.");
         }
 
-        private void processParticipantTurn(Participant participant, Card visibleCard) throws GameException {
+        private void processParticipantTurn(Participant participant, ICard visibleCard) throws GameException {
             boolean active = true;
             while (active) {
-                System.out.println(participant.getName() + " карти: " + participant.getHand() +
+                notifyObservers(participant.getName() + " карти: " + participant.getHand() +
                         " (Очки: " + participant.getHand().calculateScore() + ")");
 
                 if (participant.getHand().isBusted()) {
                     active = false;
                 } else if (participant.getHand().isBlackjack()) {
-                    System.out.println(participant.getName() + " має Блекджек!");
+                    notifyObservers(participant.getName() + " має Блекджек!");
                     active = false;
                 } else {
-                    active = participant.makeMove(deck, visibleCard);
+                    active = participant.makeMove(deck, visibleCard, msg -> notifyObservers(msg));
                 }
             }
         }
@@ -258,17 +372,17 @@ public class Main {
             int pScore = player.getHand().calculateScore();
             int dScore = dealer.getHand().calculateScore();
 
-            System.out.println("\n--- РЕЗУЛЬТАТ ---");
-            System.out.println("Гравець: " + pScore + " | Дилер: " + dScore);
+            notifyObservers("\n--- РЕЗУЛЬТАТ ---");
+            notifyObservers("Гравець: " + pScore + " | Дилер: " + dScore);
 
             if (dealer.getHand().isBusted()) {
-                System.out.println("Дилер згорів! Ви виграли!");
+                notifyObservers("Дилер згорів! Ви виграли!");
             } else if (pScore > dScore) {
-                System.out.println("Ви перемогли!");
+                notifyObservers("Ви перемогли!");
             } else if (pScore < dScore) {
-                System.out.println("Дилер переміг.");
+                notifyObservers("Дилер переміг.");
             } else {
-                System.out.println("Нічия.");
+                notifyObservers("Нічия.");
             }
         }
     }
